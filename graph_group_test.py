@@ -15,6 +15,7 @@ Required Graph API application permissions (admin-consented), e.g.:
     GroupMember.ReadWrite.All  (or Group.ReadWrite.All)
 
 Usage examples:
+    python graph_group_test.py list-groups
     python graph_group_test.py list-members --group-id <GROUP_ID>
     python graph_group_test.py add-member --group-id <GROUP_ID> --user-id <USER_ID>
     python graph_group_test.py remove-member --group-id <GROUP_ID> --user-id <USER_ID>
@@ -71,6 +72,39 @@ def graph_headers(token: str) -> dict:
     }
 
 
+def list_all_groups(token: str, search: str | None = None) -> None:
+    url = f"{GRAPH_BASE_URL}/groups"
+    headers = graph_headers(token)
+    params = {"$select": "id,displayName,mailNickname"}
+
+    if search:
+        # ConsistencyLevel: eventual is required for $search/$count on groups
+        headers["ConsistencyLevel"] = "eventual"
+        params["$search"] = f'"displayName:{search}"'
+    else:
+        params["$top"] = "999"
+
+    groups = []
+    resp = requests.get(url, headers=headers, params=params)
+    while True:
+        if not resp.ok:
+            sys.exit(f"Failed to list groups ({resp.status_code}): {resp.text}")
+        data = resp.json()
+        groups.extend(data.get("value", []))
+        next_link = data.get("@odata.nextLink")
+        if not next_link:
+            break
+        resp = requests.get(next_link, headers=headers)
+
+    if not groups:
+        print("No groups found.")
+        return
+
+    print(f"Found {len(groups)} group(s):")
+    for g in groups:
+        print(f"  - {g.get('displayName')} | {g.get('mailNickname')} | {g.get('id')}")
+
+
 def list_group_members(token: str, group_id: str) -> None:
     url = f"{GRAPH_BASE_URL}/groups/{group_id}/members"
     headers = graph_headers(token)
@@ -123,6 +157,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Azure AD B2C group membership test tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    p_groups = subparsers.add_parser("list-groups", help="List all groups")
+    p_groups.add_argument(
+        "--search", help="Filter by display name (substring match)", default=None
+    )
+
     p_list = subparsers.add_parser("list-members", help="List members of a group")
     p_list.add_argument("--group-id", required=True, help="Object ID of the group")
 
@@ -137,7 +176,9 @@ def main() -> None:
     args = parser.parse_args()
     token = get_access_token()
 
-    if args.command == "list-members":
+    if args.command == "list-groups":
+        list_all_groups(token, args.search)
+    elif args.command == "list-members":
         list_group_members(token, args.group_id)
     elif args.command == "add-member":
         add_group_member(token, args.group_id, args.user_id)
