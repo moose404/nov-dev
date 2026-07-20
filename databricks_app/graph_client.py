@@ -2,12 +2,27 @@
 Microsoft Graph API client for reading/adding/removing Azure AD B2C group members,
 using a service principal (client credentials flow).
 
-Required environment variables:
-    AZURE_TENANT_ID       - tenant ID (or B2C tenant domain, e.g. contoso.onmicrosoft.com)
-    AZURE_CLIENT_ID       - service principal (app registration) client ID
-    AZURE_CLIENT_SECRET   - service principal client secret
+The tenant_id/client_id/client_secret used to call Graph are stored in Azure Key
+Vault, not in Databricks secrets. To reach Key Vault in the first place, the app
+still needs one bootstrap credential — this uses azure-identity's
+DefaultAzureCredential, which:
+  - uses a Managed Identity automatically if the compute ever has one attached, or
+  - otherwise falls back to the AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
+    environment variables (sourced from Databricks secrets), authenticating as
+    whichever service principal has been granted "Key Vault Secrets User" on the vault.
 
-Required Graph API application permissions (admin-consented):
+Required environment variables:
+    AZURE_TENANT_ID        - bootstrap SP tenant ID (used to authenticate to Key Vault)
+    AZURE_CLIENT_ID         - bootstrap SP client ID
+    AZURE_CLIENT_SECRET     - bootstrap SP client secret
+    AZURE_KEY_VAULT_URL     - e.g. https://<your-vault-name>.vault.azure.net/
+
+Key Vault secret names (override via env vars if yours differ):
+    AZURE_KV_TENANT_ID_SECRET_NAME      (default: "graph-tenant-id")
+    AZURE_KV_CLIENT_ID_SECRET_NAME      (default: "graph-client-id")
+    AZURE_KV_CLIENT_SECRET_SECRET_NAME  (default: "graph-client-secret")
+
+Required Graph API application permissions (admin-consented) on the Graph SP:
     Group.Read.All (or Group.ReadWrite.All)  - to list groups
     GroupMember.ReadWrite.All                - to list/add/remove members
     User.Read.All                            - to resolve users by email/UPN
@@ -19,6 +34,8 @@ import os
 
 import msal
 import requests
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 SCOPES = ["https://graph.microsoft.com/.default"]
@@ -28,22 +45,30 @@ class GraphApiError(RuntimeError):
     pass
 
 
-def get_access_token() -> str:
-    tenant_id = os.environ.get("AZURE_TENANT_ID")
-    client_id = os.environ.get("AZURE_CLIENT_ID")
-    client_secret = os.environ.get("AZURE_CLIENT_SECRET")
+def _load_graph_credentials() -> tuple[str, str, str]:
+    vault_url = os.environ.get("AZURE_KEY_VAULT_URL")
+    if not vault_url:
+        raise GraphApiError("Missing required environment variable: AZURE_KEY_VAULT_URL")
 
-    missing = [
-        name
-        for name, val in (
-            ("AZURE_TENANT_ID", tenant_id),
-            ("AZURE_CLIENT_ID", client_id),
-            ("AZURE_CLIENT_SECRET", client_secret),
-        )
-        if not val
-    ]
-    if missing:
-        raise GraphApiError(f"Missing required environment variable(s): {', '.join(missing)}")
+    tenant_secret_name = os.environ.get("AZURE_KV_TENANT_ID_SECRET_NAME", "graph-tenant-id")
+    client_id_secret_name = os.environ.get("AZURE_KV_CLIENT_ID_SECRET_NAME", "graph-client-id")
+    client_secret_secret_name = os.environ.get(
+        "AZURE_KV_CLIENT_SECRET_SECRET_NAME", "graph-client-secret"
+    )
+
+    try:
+        client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+        tenant_id = client.get_secret(tenant_secret_name).value
+        client_id = client.get_secret(client_id_secret_name).value
+        client_secret = client.get_secret(client_secret_secret_name).value
+    except Exception as e:
+        raise GraphApiError(f"Failed to load credentials from Key Vault: {e}") from e
+
+    return tenant_id, client_id, client_secret
+
+
+def get_access_token() -> str:
+    tenant_id, client_id, client_secret = _load_graph_credentials()
 
     authority = f"https://login.microsoftonline.com/{tenant_id}"
     app = msal.ConfidentialClientApplication(
