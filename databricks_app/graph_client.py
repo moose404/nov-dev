@@ -2,14 +2,16 @@
 Microsoft Graph API client for reading/adding/removing Azure AD B2C group members,
 using a service principal (client credentials flow).
 
+Deliberately uses only the `requests` library (no msal / azure-identity /
+azure-keyvault-secrets) — the Databricks Apps build environment only has a
+curated/cached subset of PyPI available and could not install those SDKs.
+Token acquisition and Key Vault secret retrieval are done as plain REST calls.
+
 The tenant_id/client_id/client_secret used to call Graph are stored in Azure Key
 Vault, not in Databricks secrets. To reach Key Vault in the first place, the app
-still needs one bootstrap credential — this uses azure-identity's
-DefaultAzureCredential, which:
-  - uses a Managed Identity automatically if the compute ever has one attached, or
-  - otherwise falls back to the AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
-    environment variables (sourced from Databricks secrets), authenticating as
-    whichever service principal has been granted "Key Vault Secrets User" on the vault.
+still needs one bootstrap credential (the AZURE_TENANT_ID / AZURE_CLIENT_ID /
+AZURE_CLIENT_SECRET below, sourced from Databricks secrets) — this must belong to
+a service principal granted "Key Vault Secrets User" on the vault.
 
 Required environment variables:
     AZURE_TENANT_ID        - bootstrap SP tenant ID (used to authenticate to Key Vault)
@@ -32,23 +34,48 @@ from __future__ import annotations
 
 import os
 
-import msal
 import requests
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
-SCOPES = ["https://graph.microsoft.com/.default"]
+KEY_VAULT_API_VERSION = "7.4"
 
 
 class GraphApiError(RuntimeError):
     pass
 
 
+def _get_oauth_token(tenant_id: str, client_id: str, client_secret: str, scope: str) -> str:
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": scope,
+    }
+    resp = requests.post(url, data=data)
+    if not resp.ok:
+        raise GraphApiError(f"Failed to acquire token ({resp.status_code}): {resp.text}")
+    return resp.json()["access_token"]
+
+
 def _load_graph_credentials() -> tuple[str, str, str]:
     vault_url = os.environ.get("AZURE_KEY_VAULT_URL")
-    if not vault_url:
-        raise GraphApiError("Missing required environment variable: AZURE_KEY_VAULT_URL")
+    bootstrap_tenant_id = os.environ.get("AZURE_TENANT_ID")
+    bootstrap_client_id = os.environ.get("AZURE_CLIENT_ID")
+    bootstrap_client_secret = os.environ.get("AZURE_CLIENT_SECRET")
+
+    missing = [
+        name
+        for name, val in (
+            ("AZURE_KEY_VAULT_URL", vault_url),
+            ("AZURE_TENANT_ID", bootstrap_tenant_id),
+            ("AZURE_CLIENT_ID", bootstrap_client_id),
+            ("AZURE_CLIENT_SECRET", bootstrap_client_secret),
+        )
+        if not val
+    ]
+    if missing:
+        raise GraphApiError(f"Missing required environment variable(s): {', '.join(missing)}")
 
     tenant_secret_name = os.environ.get("AZURE_KV_TENANT_ID_SECRET_NAME", "graph-tenant-id")
     client_id_secret_name = os.environ.get("AZURE_KV_CLIENT_ID_SECRET_NAME", "graph-client-id")
@@ -56,33 +83,28 @@ def _load_graph_credentials() -> tuple[str, str, str]:
         "AZURE_KV_CLIENT_SECRET_SECRET_NAME", "graph-client-secret"
     )
 
-    try:
-        client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
-        tenant_id = client.get_secret(tenant_secret_name).value
-        client_id = client.get_secret(client_id_secret_name).value
-        client_secret = client.get_secret(client_secret_secret_name).value
-    except Exception as e:
-        raise GraphApiError(f"Failed to load credentials from Key Vault: {e}") from e
+    kv_token = _get_oauth_token(
+        bootstrap_tenant_id, bootstrap_client_id, bootstrap_client_secret, "https://vault.azure.net/.default"
+    )
+    kv_headers = {"Authorization": f"Bearer {kv_token}"}
+
+    def get_secret(name: str) -> str:
+        url = f"{vault_url.rstrip('/')}/secrets/{name}"
+        resp = requests.get(url, headers=kv_headers, params={"api-version": KEY_VAULT_API_VERSION})
+        if not resp.ok:
+            raise GraphApiError(f"Failed to read secret '{name}' from Key Vault ({resp.status_code}): {resp.text}")
+        return resp.json()["value"]
+
+    tenant_id = get_secret(tenant_secret_name)
+    client_id = get_secret(client_id_secret_name)
+    client_secret = get_secret(client_secret_secret_name)
 
     return tenant_id, client_id, client_secret
 
 
 def get_access_token() -> str:
     tenant_id, client_id, client_secret = _load_graph_credentials()
-
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-    app = msal.ConfidentialClientApplication(
-        client_id, authority=authority, client_credential=client_secret
-    )
-
-    result = app.acquire_token_for_client(scopes=SCOPES)
-
-    if "access_token" not in result:
-        raise GraphApiError(
-            f"Failed to acquire token: {result.get('error')} - {result.get('error_description')}"
-        )
-
-    return result["access_token"]
+    return _get_oauth_token(tenant_id, client_id, client_secret, "https://graph.microsoft.com/.default")
 
 
 def _headers(token: str, consistency: bool = False) -> dict:

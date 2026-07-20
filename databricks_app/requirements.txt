@@ -1,5 +1,2 @@
 streamlit
-msal
 requests
-azure-identity
-azure-keyvault-secrets
