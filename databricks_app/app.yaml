@@ -1,13 +1,9 @@
 command: ["streamlit", "run", "app.py"]
 
 env:
-  # Bootstrap identity used only to authenticate to Key Vault (DefaultAzureCredential).
   - name: "AZURE_TENANT_ID"
-    valueFrom: "azure-tenant-id"
+    valueFrom: "azure-b2c-tenant-id"
   - name: "AZURE_CLIENT_ID"
-    valueFrom: "azure-client-id"
+    valueFrom: "azure-b2c-client-id"
   - name: "AZURE_CLIENT_SECRET"
-    valueFrom: "azure-client-secret"
-  # Not a secret — replace with your actual vault URL.
-  - name: "AZURE_KEY_VAULT_URL"
-    value: "https://<your-vault-name>.vault.azure.net/"
+    valueFrom: "azure-b2c-client-secret-id"
