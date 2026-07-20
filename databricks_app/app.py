@@ -32,6 +32,11 @@ def cached_list_members(group_id: str) -> list[dict]:
     return graph.list_group_members(get_token(), group_id)
 
 
+@st.cache_data(ttl=60)
+def cached_list_users(search: str | None) -> list[dict]:
+    return graph.list_all_users(get_token(), search or None)
+
+
 def clear_member_cache() -> None:
     cached_list_members.clear()
 
@@ -113,3 +118,41 @@ with st.form("add-member-form", clear_on_submit=True):
             st.rerun()
         except graph.GraphApiError as e:
             st.error(str(e))
+
+st.divider()
+st.subheader("Browse all Azure AD users")
+st.caption("Find users regardless of whether they're already in a group.")
+with st.form("browse-users-form"):
+    user_search = st.text_input(
+        "Search by display name, UPN, or email (leave blank to list the first 999 users)"
+    )
+    browse_submitted = st.form_submit_button("Search users")
+
+if browse_submitted:
+    try:
+        st.session_state["browsed_users"] = cached_list_users(user_search)
+    except graph.GraphApiError as e:
+        st.error(str(e))
+        st.session_state["browsed_users"] = []
+
+browsed_users = st.session_state.get("browsed_users", [])
+if browsed_users:
+    existing_member_ids = {m["id"] for m in members}
+    st.markdown(f"**{len(browsed_users)} user(s) found**")
+    for user in browsed_users:
+        c1, c2, c3 = st.columns([3, 3, 1])
+        with c1:
+            st.write(user.get("displayName", "<no display name>"))
+        with c2:
+            st.write(user.get("userPrincipalName", user.get("mail", user["id"])))
+        with c3:
+            if user["id"] in existing_member_ids:
+                st.caption("In group")
+            elif st.button("Add", key=f"browse-add-{user['id']}"):
+                try:
+                    graph.add_group_member(get_token(), selected_group["id"], user["id"])
+                    st.success(f"Added {user.get('displayName', user['id'])} to group")
+                    clear_member_cache()
+                    st.rerun()
+                except graph.GraphApiError as e:
+                    st.error(str(e))

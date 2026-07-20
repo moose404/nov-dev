@@ -112,6 +112,25 @@ def list_group_members(token: str, group_id: str) -> list[dict]:
     return _get_paged(url, _headers(token))
 
 
+def list_all_users(token: str, search: str | None = None) -> list[dict]:
+    url = f"{GRAPH_BASE_URL}/users"
+    params = {"$select": "id,displayName,userPrincipalName,mail"}
+
+    if search:
+        escaped = search.replace("'", "''")
+        headers = _headers(token, consistency=True)
+        params["$filter"] = (
+            f"startswith(displayName,'{escaped}') or startswith(userPrincipalName,'{escaped}') "
+            f"or startswith(mail,'{escaped}')"
+        )
+        params["$count"] = "true"
+    else:
+        headers = _headers(token)
+        params["$top"] = "999"
+
+    return _get_paged(url, headers, params)
+
+
 def resolve_user(token: str, identifier: str) -> dict:
     """Look up a user by object ID, UPN, or email address."""
     headers = _headers(token, consistency=True)
