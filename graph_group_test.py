@@ -21,6 +21,8 @@ Usage examples:
     python graph_group_test.py remove-member --group-id <GROUP_ID> --user-id <USER_ID>
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys

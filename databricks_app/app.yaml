@@ -1,0 +1,9 @@
+command: ["streamlit", "run", "app.py"]
+
+env:
+  - name: "AZURE_TENANT_ID"
+    valueFrom: "azure-tenant-id"
+  - name: "AZURE_CLIENT_ID"
+    valueFrom: "azure-client-id"
+  - name: "AZURE_CLIENT_SECRET"
+    valueFrom: "azure-client-secret"
