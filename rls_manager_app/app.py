@@ -3,9 +3,10 @@ Databricks App (Streamlit) for managing RLS (row-level security) access.
 
 Lets you:
   - Add, edit, and remove users (name, email, tenant)
-  - For a selected user, pick a value (or ALL) for each level of the customer
-    hierarchy; Reporting Group Name must be a specific value, everything else
-    can be ALL. The resulting set of matching CustomerIDs is materialized into
+  - For a selected user, pick a value (or ALL, for no restriction) at each level
+    of the customer hierarchy, including Reporting Group Name — useful for
+    internal users who need visibility across every reporting group. The
+    resulting set of matching CustomerIDs is materialized into
     rtl_vs.rls_admin.rls_resolved_access, which Power BI's RLS role filters
     against directly.
 """
@@ -97,10 +98,7 @@ with rls_tab:
 
     existing_selection = db.get_selection(selected_user["user_id"]) or {}
 
-    st.caption(
-        "Pick a specific value for Reporting Group Name. For every other field, "
-        "'ALL' means no restriction at that level."
-    )
+    st.caption("'ALL' means no restriction at that level, including Reporting Group Name.")
 
     current_selection: dict[str, str] = {}
     for column in db.HIERARCHY_COLUMNS:
@@ -108,11 +106,7 @@ with rls_tab:
         widget_key = f"rls-{selected_user['user_id']}-{column}"
         filters_tuple = tuple(sorted(current_selection.items()))
         distinct_values = cached_distinct_values(column, filters_tuple)
-
-        if column == "reporting_group_name":
-            options = distinct_values
-        else:
-            options = [db.ALL_SENTINEL] + distinct_values
+        options = [db.ALL_SENTINEL] + distinct_values
 
         if not options:
             st.warning(f"No values available for {label} given the selections above.")
@@ -123,6 +117,12 @@ with rls_tab:
 
         value = st.selectbox(label, options, index=index, key=widget_key)
         current_selection[column] = value
+
+    if current_selection.get("reporting_group_name") == db.ALL_SENTINEL:
+        st.warning(
+            "Reporting Group Name is set to ALL — this grants access to every customer "
+            "across all reporting groups. Use only for internal users who should see everything."
+        )
 
     if len(current_selection) == len(db.HIERARCHY_COLUMNS):
         if existing_selection:

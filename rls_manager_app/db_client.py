@@ -214,7 +214,7 @@ def get_distinct_values(column: str, filters: dict[str, str]) -> list[str]:
         SELECT DISTINCT {base_col} AS value
         FROM hierarchy
         {where_sql}
-        ORDER BY {base_col}
+        ORDER BY value
     """
     rows = run_query(sql)
     return [r["value"] for r in rows if r["value"] is not None]
