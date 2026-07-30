@@ -1,0 +1,8 @@
+command: ["streamlit", "run", "app.py"]
+
+env:
+  # Not a secret — the ID of the SQL warehouse to run queries against. The app's
+  # service principal also needs "Can Use" granted directly on this warehouse
+  # (SQL Warehouses -> select warehouse -> Permissions), which isn't set via app.yaml.
+  - name: "DATABRICKS_WAREHOUSE_ID"
+    value: "<your-sql-warehouse-id>"
