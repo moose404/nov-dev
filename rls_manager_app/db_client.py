@@ -25,6 +25,11 @@ CATALOG = "rtl_vs"
 SCHEMA = "rls_admin"
 ALL_SENTINEL = "ALL"
 
+# Each hierarchy column's selection is a list of values, stored in rls_selections
+# as a single STRING joined by this delimiter (chosen to be unlikely to appear in
+# real business data — avoids needing an ARRAY<STRING> column type).
+SELECTION_DELIMITER = "\x1f"
+
 # Order matters: this is the hierarchy from broadest to narrowest, used both for
 # display and for cascading the dropdown options in the UI.
 HIERARCHY_COLUMNS = [
@@ -125,6 +130,24 @@ def _escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _encode_values(values: list[str]) -> str:
+    return SELECTION_DELIMITER.join(values) if values else ALL_SENTINEL
+
+
+def _decode_values(raw: str | None) -> list[str]:
+    if not raw:
+        return [ALL_SENTINEL]
+    return raw.split(SELECTION_DELIMITER)
+
+
+def _in_clause(column: str, values: list[str]) -> str | None:
+    """Returns an `IN (...)` predicate for `column`, or None if `values` is unrestricted (contains ALL)."""
+    if not values or ALL_SENTINEL in values:
+        return None
+    quoted = ", ".join(f"'{_escape(v)}'" for v in values)
+    return f"{BASE_COLUMN_MAP[column]} IN ({quoted})"
+
+
 def _warehouse_id() -> str:
     warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID")
     if not warehouse_id:
@@ -199,13 +222,13 @@ def delete_user(user_id: str) -> None:
 # --- Hierarchy lookups (cascading dropdown options) ---------------------
 
 
-def get_distinct_values(column: str, filters: dict[str, str]) -> list[str]:
+def get_distinct_values(column: str, filters: dict[str, list[str]]) -> list[str]:
     """Distinct values for `column`, filtered by whichever upstream (non-ALL) columns are already selected."""
     base_col = BASE_COLUMN_MAP[column]
     where_clauses = [
-        f"{BASE_COLUMN_MAP[col]} = '{_escape(val)}'"
-        for col, val in filters.items()
-        if val and val != ALL_SENTINEL
+        clause
+        for col, values in filters.items()
+        if (clause := _in_clause(col, values)) is not None
     ]
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
@@ -223,11 +246,13 @@ def get_distinct_values(column: str, filters: dict[str, str]) -> list[str]:
 # --- Selections + resolved access ---------------------------------------
 
 
-def get_selection(user_id: str) -> dict | None:
+def get_selection(user_id: str) -> dict[str, list[str]] | None:
     rows = run_query(
         f"SELECT * FROM {CATALOG}.{SCHEMA}.rls_selections WHERE user_id = '{user_id}'"
     )
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    return {col: _decode_values(rows[0].get(col)) for col in HIERARCHY_COLUMNS}
 
 
 def get_resolved_access_count(user_id: str) -> int:
@@ -237,13 +262,15 @@ def get_resolved_access_count(user_id: str) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
-def save_selection(user_id: str, selection: dict[str, str]) -> int:
+def save_selection(user_id: str, selection: dict[str, list[str]]) -> int:
     """Persists the raw selection and materializes it into rls_resolved_access.
     Returns the number of resolved rows (allowed CustomerIDs) for this user."""
     now = datetime.now(timezone.utc).isoformat()
 
     columns = ["user_id"] + HIERARCHY_COLUMNS + ["updated_at"]
-    values = [user_id] + [selection.get(col, ALL_SENTINEL) for col in HIERARCHY_COLUMNS] + [now]
+    values = [user_id] + [
+        _encode_values(selection.get(col, [ALL_SENTINEL])) for col in HIERARCHY_COLUMNS
+    ] + [now]
     escaped_values = ", ".join(f"'{_escape(v)}'" for v in values)
 
     run_statement(f"DELETE FROM {CATALOG}.{SCHEMA}.rls_selections WHERE user_id = '{user_id}'")
@@ -257,7 +284,7 @@ def save_selection(user_id: str, selection: dict[str, str]) -> int:
     return _resolve_and_store_access(user_id, selection)
 
 
-def _resolve_and_store_access(user_id: str, selection: dict[str, str]) -> int:
+def _resolve_and_store_access(user_id: str, selection: dict[str, list[str]]) -> int:
     user_rows = run_query(
         f"SELECT email FROM {CATALOG}.{SCHEMA}.rls_users WHERE user_id = '{user_id}'"
     )
@@ -266,9 +293,9 @@ def _resolve_and_store_access(user_id: str, selection: dict[str, str]) -> int:
     email = user_rows[0]["email"]
 
     where_clauses = [
-        f"{BASE_COLUMN_MAP[col]} = '{_escape(selection.get(col, ALL_SENTINEL))}'"
+        clause
         for col in HIERARCHY_COLUMNS
-        if selection.get(col, ALL_SENTINEL) != ALL_SENTINEL
+        if (clause := _in_clause(col, selection.get(col, [ALL_SENTINEL]))) is not None
     ]
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     now = datetime.now(timezone.utc).isoformat()

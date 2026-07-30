@@ -89,8 +89,10 @@ with rls_tab:
         st.stop()
 
     @st.cache_data(ttl=120)
-    def cached_distinct_values(column: str, filters_tuple: tuple[tuple[str, str], ...]) -> list[str]:
-        return db.get_distinct_values(column, dict(filters_tuple))
+    def cached_distinct_values(
+        column: str, filters_tuple: tuple[tuple[str, tuple[str, ...]], ...]
+    ) -> list[str]:
+        return db.get_distinct_values(column, {col: list(vals) for col, vals in filters_tuple})
 
     user_labels = {f"{u['name']} ({u['email']})": u for u in users}
     selected_label = st.selectbox("Select a user", list(user_labels.keys()))
@@ -98,13 +100,17 @@ with rls_tab:
 
     existing_selection = db.get_selection(selected_user["user_id"]) or {}
 
-    st.caption("'ALL' means no restriction at that level, including Reporting Group Name.")
+    st.caption(
+        "Select one or more values per level. 'ALL' means no restriction at that level, "
+        "including Reporting Group Name — selecting ALL alongside other values makes that "
+        "level unrestricted regardless of the other picks."
+    )
 
-    current_selection: dict[str, str] = {}
+    current_selection: dict[str, list[str]] = {}
     for column in db.HIERARCHY_COLUMNS:
         label = db.COLUMN_LABELS[column]
         widget_key = f"rls-{selected_user['user_id']}-{column}"
-        filters_tuple = tuple(sorted(current_selection.items()))
+        filters_tuple = tuple((col, tuple(vals)) for col, vals in current_selection.items())
         distinct_values = cached_distinct_values(column, filters_tuple)
         options = [db.ALL_SENTINEL] + distinct_values
 
@@ -112,15 +118,22 @@ with rls_tab:
             st.warning(f"No values available for {label} given the selections above.")
             break
 
-        default_value = existing_selection.get(column) if existing_selection else None
-        index = options.index(default_value) if default_value in options else 0
+        existing_values = existing_selection.get(column) if existing_selection else None
+        default_values = [v for v in (existing_values or [db.ALL_SENTINEL]) if v in options] or [
+            db.ALL_SENTINEL
+        ]
 
-        value = st.selectbox(label, options, index=index, key=widget_key)
-        current_selection[column] = value
+        selected_values = st.multiselect(label, options, default=default_values, key=widget_key)
+        if not selected_values:
+            selected_values = [db.ALL_SENTINEL]
+        if db.ALL_SENTINEL in selected_values and len(selected_values) > 1:
+            st.caption(f"{label}: ALL is selected, so the other picks here are ignored.")
 
-    if current_selection.get("reporting_group_name") == db.ALL_SENTINEL:
+        current_selection[column] = selected_values
+
+    if db.ALL_SENTINEL in current_selection.get("reporting_group_name", []):
         st.warning(
-            "Reporting Group Name is set to ALL — this grants access to every customer "
+            "Reporting Group Name includes ALL — this grants access to every customer "
             "across all reporting groups. Use only for internal users who should see everything."
         )
 
